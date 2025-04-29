@@ -1,0 +1,134 @@
+# 探索结果奖励的极限：基于结果奖励的数学推理强化学习
+
+## 1.研究背景与动机
+
+**问题定义**：数学推理是通用人工智能（AGI）的核心能力之一，但现有方法（如监督微调或偏好对齐）在长推理链任务中面临**稀疏奖励**的挑战，尤其是仅依赖二元结果反馈（正确/错误）时。
+
+**现有局限**：专有模型（如OpenAI的o-series）技术细节不透明，而开源方法（如蒸馏）受限于教师模型性能，且无法超越其能力边界。
+
+**核心目标**：探索在二元结果奖励下，如何通过强化学习（RL）突破数学推理的性能极限，提出理论严谨且高效的框架。
+
+## 2.核心贡献：OREAL框架（**O**utcome **RE**w**A**rd-based **L**earning）
+
+### 1.BoN采样与行为克隆的理论基础
+
+**1.1问题形式化**
+
+- 环境设定：数学推理任务建模为马尔可夫决策过程（MDP），其中：
+  - 状态空间 $\mathcal{S}$：推理过程中的中间步骤（如当前生成的推理链前缀）
+  - 动作空间$\mathcal{A}$：语言模型的词表（生成下一个token）
+  - 奖励函数$r(s,a)$：仅依赖最终答案正确性的二元奖励（1|0）（式3）
+- 目标函数：KL正则化策略优化（式1）：
+
+​	$J(\theta)=\mathbb{E}_{s,a}[Q^{\pi_\theta}(s,a)]-\alpha \cdot \mathbb{E}_S[D_\text{KL}(\pi_\theta(\cdot|s)||\pi_0(\cdot|s))]$
+
+其中 $Q^\pi$ 是状态-动作值函数，$\pi_0$ 是参考策略（如预训练模型）
+
+**1.2BoN采样的分布特性**
+
+- BoN分布形式化（式4）：
+
+  $\pi_{\text{BoN}}(s)=n \cdot [P(s)]^{n-1} \cdot \pi(s)$
+
+  - $P(s)$：原策略 $\pi$ 下轨迹s的累积分布函数（CDF）
+
+  - KL散度分析：
+
+    $\text{KL}(\pi_{\text{BoN}}||\pi)=\log n- \frac{n-1}{n}$
+
+    当 $n \rightarrow \infty,\text{KL} -rightarrow \log n$，表面BoN分布可覆盖任意KL约束下的最优策略
+
+- 最优策略闭式解（式2）：
+
+​	$\pi^*(a|s)=\frac{\pi_0(a|s)\exp(Q^\pi(s,a)/\alpha)}{Z(s)}$
+
+​	其中 $Z(s)$ 为归一化因子，BoN采样通过筛选高奖励轨迹，逼近该最优分布
+
+**1.3行为克隆的充分性**
+
+- 正样本对齐：对BoN筛选的正样本集 $D^+$，通过最大似然目标：
+
+​	$\mathcal{L}_1(\theta)=\mathbb{E}_{s\sim D^+}[-\log \pi_\theta(s)]+\beta\text{KL}(\pi_\theta||\pi_{\text{old}})$
+
+​	理论证明，当 $n \rightarrow \infty$，该目标等价与直接优化式1，无需显式估计Q函数
+
+### 2.负样本奖励塑形
+
+**2.1梯度不一致问题**
+
+- BoN分布的负样本概率（式5）：
+
+  $\pi_{\text{BoN}}(s)=\pi(s)[R(s) \cdot \frac{1-(1-p)^n}{p}+(1-R(s))\cdot (1-p)^{n-1}]$
+
+  - $p=\mathbb{E}_{s\sim \pi}[R(s)=1]$：正样本概率
+  - 负样本权重随n指数衰减，导致梯度估计偏置
+
+**2.2奖励塑形函数设计**
+
+- 梯度分解（式6）：
+
+​	$\nabla_\theta J_{\text{BoN}}=\mathbb{E}_{s \sim \pi_{\text{BoN}}}[R(s)\nabla_\theta \log \pi_{\text{BoN}}(s)]$
+
+​	展开后，正负样本的梯度权重分别为 $n(1-p)^{n-1}$ 和 $n(1-p)^n$
+
+- 奖励重塑：引入缩放因子 $R^*(s)=(1-p)R(s)$，使负样本梯度权重与正样本一致：
+
+​	$\nabla_\theta J_{\text{adjusted}}=\mathbb{E}_s[R^*(s)\nabla_\theta \log \pi(s)]$
+
+​	该操作确保正负样本对策略更新的贡献平衡
+
+**2.3损失函数设计**
+
+- 负样本优化目标：
+
+  $\mathcal{L}_2(\theta)=\mathbb{E}_{s \sim S_-}[F(1-p)\log\frac{\pi_\theta(s)}{\pi_{\text{old}}(s)}]+\beta \text{KL}(\pi_\theta || \pi_{\text{old}})$
+
+  - $F(1-p)$：优势函数估计
+  - 通过蒙特卡洛估计p，动态调整负样本权重
+
+### 3.令牌级奖励模型
+
+**3.1信用分配问题**
+
+- 挑战：长推理链中仅序列级二元反馈无法定位关键错误步骤
+- 优势函数分解（式7-9）：
+  - 值函数简化：因中间无奖励，$V^\pi(s_{\leq t})=\sum_{k=0}^{T-t}\gamma^kr(s_{t+k})=r(s)$（最终奖励）
+  - 优势函数 $A(s_{\leq t})=V^\pi(s_{\leq{t+1}})-V^\pi(s_{\leq t})$，表示第t步对最终结果的贡献
+
+**3.2令牌级权重训练**
+
+- 模型设计：训练轻量级模型 $w(s_{\leq t})$ 满足：
+
+  $\frac{1}{T}\sum_{t=0}^T w(s_{\leq t})=r(s)$
+
+  - 通过交叉熵损失（式12）优化：
+
+    $\mathcal{L}_{\text{CE}}=-\mathbb{E}_{(s,r)}[r\log p(s) + (1-r)\log (1-p(s))]$
+
+  其中 $p(s)=\sigma(\frac{1}{T}\sum_{t}w(s_t))$
+
+**3.3权重应用**
+
+- 梯度加权（式10-11）：
+
+  $\mathcal{w}^+=\max(2\sigma(w)-1,0),\quad \mathcal{w}^-=\max(1-2\sigma(w),0)$
+
+  - 正样本：高权重区域（如关键推理步骤）增强模仿学习
+  - 负样本：低权重区域（如错误步骤）抑制错误格式
+
+### 4.统一优化目标
+
+- 总损失函数（式11）：
+
+​	$\mathcal{L}_{\text{total}}=\mathcal{L}_1+\mathcal{L}_2+\text{KL正则项}$
+
+​	具体展开为：
+
+​	$\mathcal{L}_{\text{total}}=\mathbb{E}_s[\sum_{t}(-\mathcal{w}^+\log\pi_\theta(s_{\leq t})I_{D_+}(s))+\eta w^- \log\frac{\pi_\theta(s_{\leq t})}{\pi_{\text{old}}(s_{\leq t})}I_{D_-}(s)]+\beta \text{KL}$
+
+​	$\eta$：正负样本损失平衡系数
+
+​	KL正则项：防止策略偏移初始模型过远
+
+
+
